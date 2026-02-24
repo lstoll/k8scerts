@@ -1,0 +1,4 @@
+/input/*
+**/ca.crt
+**/ca.key
+kind.kubeconfig

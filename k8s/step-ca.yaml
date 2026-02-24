@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: step-ca
+  namespace: default
+spec:
+  selector:
+    app: step-ca
+  ports:
+  - port: 9000
+    targetPort: 9000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: step-ca
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: step-ca
+  template:
+    metadata:
+      labels:
+        app: step-ca
+    spec:
+      containers:
+      - name: step-ca
+        image: smallstep/step-ca:latest
+        args:
+        - "step-ca"
+        - "/home/step/config/ca.json"
+        ports:
+        - containerPort: 9000
+        volumeMounts:
+        - name: config
+          mountPath: /home/step/config
+          readOnly: true
+        - name: certs
+          mountPath: /home/step/certs
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: step-ca-config
+      - name: certs
+        secret:
+          secretName: step-ca-certs

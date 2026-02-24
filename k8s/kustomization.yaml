@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- controller.yaml
+- step-ca.yaml
+secretGenerator:
+- name: pod-cert-signer-ca
+  files:
+  - ca.crt
+  - ca.key
+- name: step-ca-certs
+  files:
+  - step-ca/root_ca.crt
+  - step-ca/root_ca.key
+  - step-ca/intermediate_ca.crt
+  - step-ca/intermediate_ca.key
+- name: step-provisioner-keyset
+  files:
+  - step-ca/provisioner_keyset.json
+configMapGenerator:
+- name: step-ca-config
+  files:
+  - step-ca/ca.json

@@ -1,0 +1,20 @@
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: pod-cert-controller
+build:
+  local:
+    useBuildkit: true
+  artifacts:
+  - image: pod-cert-controller
+    docker:
+      dockerfile: Dockerfile
+  - image: pod-cert-verify
+    docker:
+      dockerfile: Dockerfile.verify
+manifests:
+  kustomize:
+    paths:
+    - k8s
+deploy:
+  kubectl: {}

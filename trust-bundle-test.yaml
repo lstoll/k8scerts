@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: trust-bundle-test
+spec:
+  containers:
+  - name: test
+    image: alpine
+    command: ["/bin/sh", "-c"]
+    args:
+    - |
+      echo "Waiting for CA..."
+      while [ ! -f /var/run/trust/ca.crt ]; do sleep 1; done
+      echo "SUCCESS_CA_FOUND"
+      cat /var/run/trust/ca.crt
+      sleep infinity
+    volumeMounts:
+    - name: trust
+      mountPath: /var/run/trust
+  volumes:
+  - name: trust
+    projected:
+      sources:
+      - clusterTrustBundle:
+          name: "example.com:pod-signer:ca"
+          path: ca.crt

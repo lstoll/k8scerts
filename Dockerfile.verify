@@ -1,0 +1,19 @@
+FROM golang:1-trixie AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -o verify-cert ./cmd/verify-cert
+
+FROM debian:trixie-slim
+
+WORKDIR /app
+COPY --from=builder /app/verify-cert .
+
+ENTRYPOINT ["/app/verify-cert"]

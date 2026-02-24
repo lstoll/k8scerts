@@ -1,0 +1,32 @@
+{
+  "address": ":9000",
+  "root": "/home/step/certs/root_ca.crt",
+  "crt": "/home/step/certs/intermediate_ca.crt",
+  "key": "/home/step/certs/intermediate_ca.key",
+  "dnsNames": [
+    "step-ca",
+    "localhost"
+  ],
+  "logger": {
+    "format": "text"
+  },
+  "authority": {
+    "provisioners": [
+      {
+        "type": "JWK",
+        "name": "pod-cert-issuer",
+        "key": {
+          "alg": "ES256",
+          "crv": "P-256",
+          "key_ops": [
+            "verify"
+          ],
+          "kty": "EC",
+          "use": "sig",
+          "x": "1eKgV9suRTuWrE_WO8fSAMCn-kVvsmga9oTkllkGyqw",
+          "y": "dgkYercUizu-Ux0bzj36JfInEG-UkewLB_XdhDlPJu8"
+        }
+      }
+    ]
+  }
+}
