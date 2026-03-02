@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Go format
+        run: |
+          if [ -n "$(go fmt ./...)" ]; then
+            echo "Run 'go fmt ./...' and commit the changes"
+            exit 1
+          fi
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go test
+        run: go test -v ./...
+
+      - name: Create k8s cluster
+        uses: helm/kind-action@v1.9.0
+        with:
+          cluster_name: k8scerts
+          config: kind-config.yaml
+
+      - name: Install Skaffold
+        run: |
+          curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
+          sudo install skaffold /usr/local/bin/
+
+      - name: Generate CA
+        run: |
+          mkdir -p k8s
+          (cd k8s && go run ../cmd/p384-ca-gen/main.go)
+
+      - name: Deploy controller
+        run: skaffold run --status-check=true
+
+      - name: Run verification
+        run: ./hack/verify.sh
