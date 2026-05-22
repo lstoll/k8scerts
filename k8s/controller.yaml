@@ -3,6 +3,9 @@ kind: ServiceAccount
 metadata:
   name: pod-cert-controller
   namespace: default
+  # Required for GCP KMS mode on GKE. Replace with your Google service account email.
+  # annotations:
+  #   iam.gke.io/gcp-service-account: pod-signer@MY_PROJECT.iam.gserviceaccount.com
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -55,6 +58,33 @@ spec:
       containers:
       - name: controller
         image: pod-cert-controller
+        # Example for GCP KMS mode on GKE with Workload Identity:
+        #
+        # Prerequisites:
+        # 1. Create a Google service account (GSA), e.g. pod-signer@MY_PROJECT.iam.gserviceaccount.com
+        # 2. Grant the GSA roles/cloudkms.viewer and roles/cloudkms.signer on the KMS key
+        # 3. Bind Workload Identity:
+        #      gcloud iam service-accounts add-iam-policy-binding pod-signer@MY_PROJECT.iam.gserviceaccount.com \
+        #        --role roles/iam.workloadIdentityUser \
+        #        --member "serviceAccount:MY_PROJECT.svc.id.goog[default/pod-cert-controller]"
+        # 4. Annotate the Kubernetes ServiceAccount (see above)
+        # 5. Store the offline-signed subordinate CA cert in a Secret:
+        #      kubectl create secret generic ca-cert-secret --from-file=ca.crt=k8s/ca.crt
+        #    Optionally include the offline root for the trust bundle:
+        #      kubectl create secret generic root-ca-secret --from-file=root_ca.crt=root_ca.crt
+        #
+        # args:
+        # - "--mode=gcpkms"
+        # - "--ca-cert=/etc/k8scerts/ca.crt"
+        # - "--kms-key-id=projects/MY_PROJECT/locations/MY_LOCATION/keyRings/MY_KEYRING/cryptoKeys/MY_KEY/cryptoKeyVersions/1"
+        # - "--root-ca-cert=/etc/k8scerts/root_ca.crt"
+        # - "--debug"
+        # volumeMounts:
+        # - name: ca-cert
+        #   mountPath: /etc/k8scerts
+        #   readOnly: true
+        #
+        # Example for Step mode:
         args:
         - "--mode=step"
         - "--step-url=https://step-ca:9000"
@@ -70,6 +100,22 @@ spec:
           mountPath: /etc/step-ca
           readOnly: true
       volumes:
+      # Example volumes for GCP KMS mode:
+      # - name: ca-cert
+      #   projected:
+      #     sources:
+      #     - secret:
+      #         name: ca-cert-secret
+      #         items:
+      #         - key: ca.crt
+      #           path: ca.crt
+      #     - secret:
+      #         name: root-ca-secret
+      #         optional: true
+      #         items:
+      #         - key: root_ca.crt
+      #           path: root_ca.crt
+      #
       - name: step-keyset
         secret:
           secretName: step-provisioner-keyset

@@ -10,7 +10,10 @@ This project implements a Kubernetes controller for the Pod Certificates API (KE
 - **Issuance Backends:** Supports multiple backends via the `Issuer` interface:
     - **Static:** Local self-signed CA.
     - **Step-CA:** Integration with `smallstep/step-ca` using JWK provisioners and Tink Go v2 for JWT signing.
+    - **GCP KMS:** Cloud KMS-backed asymmetric signing with offline-generated CA certificate.
 - **Trust Distribution:** The CA certificate is published as a `ClusterTrustBundle` named `example.com:pod-signer:ca`.
+    - **Static / GCP KMS:** Publish the issuing CA certificate. In GCP KMS mode, optionally append the offline root via `--root-ca-cert` when workloads need the full chain.
+    - **Step-CA:** Publish the Step-CA root certificate.
 
 ## Engineering Standards
 
@@ -38,6 +41,7 @@ This project implements a Kubernetes controller for the Pod Certificates API (KE
 ### Security
 - **CA Management:** CA certificates and keys must reside in `k8s/` and be ignored by `.gitignore`.
 - **RBAC:** The controller requires `sign` and `attest` permissions on the specific signer resource name.
+- **GCP KMS:** The controller validates at startup that the KMS key version public key matches the configured CA certificate. On GKE, authenticate via Workload Identity (`iam.gke.io/gcp-service-account` annotation on the Kubernetes ServiceAccount).
 
 ## Code Conventions
 - **Client:** Use direct `client-go` instead of `controller-runtime` to maintain compatibility with bleeding-edge Kubernetes alpha/beta types.

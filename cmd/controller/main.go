@@ -24,6 +24,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"lds.li/k8scerts/internal/kms"
 )
 
 const (
@@ -36,13 +37,21 @@ type Issuer interface {
 	TrustBundle() string
 }
 
+type signContextSetter interface {
+	SetSignContext(context.Context)
+}
+
 type StaticIssuer struct {
 	caCert      *x509.Certificate
 	caKey       crypto.PrivateKey
-	caCertBytes []byte
+	trustBundle []byte
 }
 
 func (i *StaticIssuer) Issue(ctx context.Context, csr *x509.CertificateRequest, expiration time.Duration, podName, namespace string) (string, error) {
+	if setter, ok := i.caKey.(signContextSetter); ok {
+		setter.SetSignContext(ctx)
+	}
+
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
 	if err != nil {
@@ -68,7 +77,28 @@ func (i *StaticIssuer) Issue(ctx context.Context, csr *x509.CertificateRequest, 
 }
 
 func (i *StaticIssuer) TrustBundle() string {
-	return string(i.caCertBytes)
+	return string(i.trustBundle)
+}
+
+func buildTrustBundle(caCertBytes []byte, rootCAFile string) ([]byte, error) {
+	caCertBytes = bytes.TrimSpace(caCertBytes)
+	if rootCAFile == "" {
+		return caCertBytes, nil
+	}
+
+	rootBytes, err := os.ReadFile(rootCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read root CA cert: %w", err)
+	}
+	rootBytes = bytes.TrimSpace(rootBytes)
+	if len(rootBytes) == 0 {
+		return nil, fmt.Errorf("root CA cert file is empty")
+	}
+	if _, rest := pem.Decode(rootBytes); len(rest) > 0 {
+		return nil, fmt.Errorf("root CA cert file must contain a single PEM certificate")
+	}
+
+	return append(append([]byte(nil), caCertBytes...), append([]byte("\n"), rootBytes...)...), nil
 }
 
 func ptr[T any](v T) *T {
@@ -270,10 +300,13 @@ func main() {
 	var stepProvName string
 	var stepKeysetFile string
 	var stepRootFile string
+	var kmsKeyID string
+	var rootCAFile string
 
-	flag.StringVar(&mode, "mode", "static", "Issuer mode: static or step")
-	flag.StringVar(&caCertFile, "ca-cert", "k8s/ca.crt", "Path to CA certificate (static mode)")
+	flag.StringVar(&mode, "mode", "static", "Issuer mode: static, step or gcpkms")
+	flag.StringVar(&caCertFile, "ca-cert", "k8s/ca.crt", "Path to CA certificate (static or gcpkms mode)")
 	flag.StringVar(&caKeyFile, "ca-key", "k8s/ca.key", "Path to CA key (static mode)")
+	flag.StringVar(&rootCAFile, "root-ca-cert", "", "Optional offline root CA certificate to append to the ClusterTrustBundle (gcpkms mode)")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig")
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
 
@@ -281,6 +314,7 @@ func main() {
 	flag.StringVar(&stepProvName, "step-provisioner", "", "Step-CA Provisioner Name")
 	flag.StringVar(&stepKeysetFile, "step-keyset", "", "Path to Tink Keyset for Step-CA")
 	flag.StringVar(&stepRootFile, "step-root", "", "Path to Step-CA Root certificate")
+	flag.StringVar(&kmsKeyID, "kms-key-id", "", "GCP KMS key version resource ID for gcpkms mode")
 
 	flag.Parse()
 
@@ -323,7 +357,41 @@ func main() {
 			slog.Error("unable to parse ca key", "error", err)
 			os.Exit(1)
 		}
-		issuer = &StaticIssuer{caCert: caCert, caKey: caKey, caCertBytes: caCertBytes}
+		issuer = &StaticIssuer{caCert: caCert, caKey: caKey, trustBundle: caCertBytes}
+	} else if mode == "gcpkms" {
+		if kmsKeyID == "" {
+			slog.Error("kms-key-id flag is required for gcpkms mode")
+			os.Exit(1)
+		}
+		caCertBytes, err := os.ReadFile(caCertFile)
+		if err != nil {
+			slog.Error("unable to read ca cert", "error", err)
+			os.Exit(1)
+		}
+		block, _ := pem.Decode(caCertBytes)
+		if block == nil {
+			slog.Error("failed to decode ca cert PEM")
+			os.Exit(1)
+		}
+		caCert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			slog.Error("unable to parse ca cert", "error", err)
+			os.Exit(1)
+		}
+
+		trustBundle, err := buildTrustBundle(caCertBytes, rootCAFile)
+		if err != nil {
+			slog.Error("unable to build trust bundle", "error", err)
+			os.Exit(1)
+		}
+
+		kmsSigner, err := kms.NewSigner(context.Background(), kmsKeyID, caCert.PublicKey)
+		if err != nil {
+			slog.Error("unable to create KMS signer", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("KMS key validated against CA certificate", "kms-key-id", kmsKeyID)
+		issuer = &StaticIssuer{caCert: caCert, caKey: kmsSigner, trustBundle: trustBundle}
 	} else if mode == "step" {
 		ksBytes, err := os.ReadFile(stepKeysetFile)
 		if err != nil {
