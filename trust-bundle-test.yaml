@@ -22,5 +22,5 @@ spec:
     projected:
       sources:
       - clusterTrustBundle:
-          name: "example.com:pod-signer:ca"
+          signerName: "${SIGNER_NAME}"
           path: ca.crt

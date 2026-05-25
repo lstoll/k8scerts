@@ -45,8 +45,8 @@ func leaderElectionNamespace(flagValue string) string {
 	return "default"
 }
 
-func runController(ctx context.Context, clientset kubernetes.Interface, issuer Issuer, controller *Controller) {
-	go syncCTB(ctx, clientset, issuer)
+func runController(ctx context.Context, clientset kubernetes.Interface, issuer Issuer, controller *Controller, cfg controllerRuntime) {
+	go syncCTB(ctx, clientset, issuer, cfg)
 	controller.Run(ctx)
 }
 
@@ -55,10 +55,11 @@ func runWithOptionalLeaderElection(
 	clientset kubernetes.Interface,
 	issuer Issuer,
 	controller *Controller,
+	runtime controllerRuntime,
 	cfg leaderElectionConfig,
 ) {
 	if !cfg.enabled {
-		runController(ctx, clientset, issuer, controller)
+		runController(ctx, clientset, issuer, controller, runtime)
 		return
 	}
 
@@ -89,7 +90,7 @@ func runWithOptionalLeaderElection(
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				slog.Info("became leader", "identity", id)
-				runController(ctx, clientset, issuer, controller)
+				runController(ctx, clientset, issuer, controller, runtime)
 			},
 			OnStoppedLeading: func() {
 				slog.Info("no longer leader", "identity", id)

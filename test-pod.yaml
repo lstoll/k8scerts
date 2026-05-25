@@ -15,9 +15,9 @@ spec:
     projected:
       sources:
       - podCertificate:
-          signerName: "example.com/pod-signer"
+          signerName: "${SIGNER_NAME}"
           keyType: ECDSAP384
           credentialBundlePath: pod.pem
       - clusterTrustBundle:
-          name: "example.com:pod-signer:ca"
+          signerName: "${SIGNER_NAME}"
           path: ca.crt

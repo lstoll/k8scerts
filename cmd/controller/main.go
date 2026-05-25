@@ -30,10 +30,10 @@ import (
 	"lds.li/k8scerts/internal/kms"
 )
 
-const (
-	signerName = "example.com/pod-signer"
-	ctbName    = "example.com:pod-signer:ca"
-)
+type controllerRuntime struct {
+	signerName      string
+	trustBundleName string
+}
 
 type Issuer interface {
 	Issue(ctx context.Context, csr *x509.CertificateRequest, expiration time.Duration, podName, namespace string) (string, error)
@@ -109,18 +109,20 @@ func ptr[T any](v T) *T {
 }
 
 type Controller struct {
-	clientset kubernetes.Interface
-	issuer    Issuer
-	queue     workqueue.TypedRateLimitingInterface[string]
-	informer  cache.SharedIndexInformer
+	clientset  kubernetes.Interface
+	issuer     Issuer
+	signerName string
+	queue      workqueue.TypedRateLimitingInterface[string]
+	informer   cache.SharedIndexInformer
 }
 
-func NewController(clientset kubernetes.Interface, issuer Issuer, informer cache.SharedIndexInformer) *Controller {
+func NewController(clientset kubernetes.Interface, issuer Issuer, informer cache.SharedIndexInformer, signerName string) *Controller {
 	c := &Controller{
-		clientset: clientset,
-		issuer:    issuer,
-		informer:  informer,
-		queue:     workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
+		clientset:  clientset,
+		issuer:     issuer,
+		signerName: signerName,
+		informer:   informer,
+		queue:      workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 	}
 
 	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -185,7 +187,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	}
 
 	pcr := obj.(*certsv1beta1.PodCertificateRequest)
-	if pcr.Spec.SignerName != signerName {
+	if pcr.Spec.SignerName != c.signerName {
 		return nil
 	}
 
@@ -269,23 +271,23 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	return nil
 }
 
-func syncCTB(ctx context.Context, clientset kubernetes.Interface, issuer Issuer) {
+func syncCTB(ctx context.Context, clientset kubernetes.Interface, issuer Issuer, cfg controllerRuntime) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
 	sync := func() {
-		slog.Debug("Syncing ClusterTrustBundle")
+		slog.Debug("Syncing ClusterTrustBundle", "name", cfg.trustBundleName, "signer", cfg.signerName)
 		ctb := &certsv1beta1.ClusterTrustBundle{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: ctbName,
+				Name: cfg.trustBundleName,
 			},
 			Spec: certsv1beta1.ClusterTrustBundleSpec{
-				SignerName:  signerName,
+				SignerName:  cfg.signerName,
 				TrustBundle: issuer.TrustBundle(),
 			},
 		}
 
-		existing, err := clientset.CertificatesV1beta1().ClusterTrustBundles().Get(ctx, ctbName, metav1.GetOptions{})
+		existing, err := clientset.CertificatesV1beta1().ClusterTrustBundles().Get(ctx, cfg.trustBundleName, metav1.GetOptions{})
 		if err != nil {
 			if _, err := clientset.CertificatesV1beta1().ClusterTrustBundles().Create(ctx, ctb, metav1.CreateOptions{}); err != nil {
 				slog.Error("failed to create ClusterTrustBundle", "error", err)
@@ -327,6 +329,8 @@ func main() {
 	var stepRootFile string
 	var kmsKeyID string
 	var rootCAFile string
+	var signerName string
+	var trustBundleName string
 
 	var leaderElect bool
 	var leaderLeaseName string
@@ -339,6 +343,8 @@ func main() {
 	flag.StringVar(&caCertFile, "ca-cert", "k8s/ca.crt", "Path to CA certificate (static or gcpkms mode)")
 	flag.StringVar(&caKeyFile, "ca-key", "k8s/ca.key", "Path to CA key (static mode)")
 	flag.StringVar(&rootCAFile, "root-ca-cert", "", "Optional offline root CA certificate to append to the ClusterTrustBundle (gcpkms mode)")
+	flag.StringVar(&signerName, "signer-name", defaultSignerName, "Signer name managed by this controller")
+	flag.StringVar(&trustBundleName, "trust-bundle-name", "", "ClusterTrustBundle name (defaults to <signer-name-with-colons>:ca)")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig")
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
 
@@ -356,6 +362,23 @@ func main() {
 	flag.DurationVar(&leaderRetryPeriod, "leader-elect-retry-period", 2*time.Second, "Leader election retry period")
 
 	flag.Parse()
+
+	if trustBundleName == "" {
+		trustBundleName = defaultTrustBundleName(signerName)
+	}
+	if err := validateTrustBundleName(signerName, trustBundleName); err != nil {
+		slog.Error("invalid trust bundle configuration", "error", err)
+		os.Exit(1)
+	}
+
+	runtime := controllerRuntime{
+		signerName:      signerName,
+		trustBundleName: trustBundleName,
+	}
+	slog.Info("controller configuration",
+		"signer-name", runtime.signerName,
+		"trust-bundle-name", runtime.trustBundleName,
+	)
 
 	level := slog.LevelInfo
 	if debug {
@@ -474,12 +497,12 @@ func main() {
 	factory := informers.NewSharedInformerFactory(clientset, 10*time.Minute)
 	pcrInformer := factory.Certificates().V1beta1().PodCertificateRequests().Informer()
 
-	controller := NewController(clientset, issuer, pcrInformer)
+	controller := NewController(clientset, issuer, pcrInformer, runtime.signerName)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	runWithOptionalLeaderElection(ctx, clientset, issuer, controller, leaderElectionConfig{
+	runWithOptionalLeaderElection(ctx, clientset, issuer, controller, runtime, leaderElectionConfig{
 		enabled:       leaderElect,
 		leaseName:     leaderLeaseName,
 		leaseNS:       leaderElectionNamespace(leaderLeaseNamespace),

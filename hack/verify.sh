@@ -14,6 +14,7 @@ fi
 echo "--- 2. Getting Kubeconfig ---"
 kind get kubeconfig --name "$KIND_CLUSTER_NAME" > kind.kubeconfig
 export KUBECONFIG=$(pwd)/kind.kubeconfig
+export SIGNER_NAME=${SIGNER_NAME:-example.com/pod-signer}
 
 echo "--- 5. Deploying Test Pods ---"
 kubectl delete pod cert-test trust-bundle-test --ignore-not-found --grace-period=0 --force
@@ -25,7 +26,7 @@ echo "Loading image ${VERIFY_IMG} into kind cluster..."
 kind load docker-image "${VERIFY_IMG}" --name "$KIND_CLUSTER_NAME"
 
 envsubst < test-pod.yaml | kubectl apply -f -
-kubectl apply -f trust-bundle-test.yaml
+envsubst < trust-bundle-test.yaml | kubectl apply -f -
 
 echo "--- 6. Waiting for Pods to be ready ---"
 kubectl wait --for=condition=Ready pod/cert-test pod/trust-bundle-test --timeout=120s

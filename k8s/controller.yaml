@@ -95,6 +95,7 @@ spec:
         # Example for Step mode:
         args:
         - "--leader-elect=true"
+        - "--signer-name=example.com/pod-signer"
         - "--mode=step"
         - "--step-url=https://step-ca:9000"
         - "--step-provisioner=pod-cert-issuer"
