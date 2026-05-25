@@ -12,6 +12,8 @@ import (
 	"log/slog"
 	"math/big"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/tink-crypto/tink-go/v2/insecurecleartextkeyset"
@@ -22,6 +24,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	"lds.li/k8scerts/internal/kms"
@@ -138,6 +141,11 @@ func (c *Controller) Run(ctx context.Context) {
 	defer c.queue.ShutDown()
 	slog.Info("Starting controller")
 
+	go func() {
+		<-ctx.Done()
+		c.queue.ShutDown()
+	}()
+
 	go c.informer.Run(ctx.Done())
 
 	if !cache.WaitForCacheSync(ctx.Done(), c.informer.HasSynced) {
@@ -212,32 +220,49 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		return fmt.Errorf("failed to issue certificate: %w", err)
 	}
 
-	pcrCopy := pcr.DeepCopy()
-	pcrCopy.Status.CertificateChain = certChain
+	statusUpdate := func(latest *certsv1beta1.PodCertificateRequest) (*certsv1beta1.PodCertificateRequest, error) {
+		if latest.Status.CertificateChain != "" {
+			return latest, nil
+		}
 
-	// Simplification: Parse issued cert to get validity times
-	block, _ := pem.Decode([]byte(certChain))
-	issuedCert, err := x509.ParseCertificate(block.Bytes)
-	if err == nil {
-		nb := metav1.NewTime(issuedCert.NotBefore)
-		na := metav1.NewTime(issuedCert.NotAfter)
-		br := metav1.NewTime(issuedCert.NotBefore.Add(issuedCert.NotAfter.Sub(issuedCert.NotBefore) / 2))
-		pcrCopy.Status.NotBefore = &nb
-		pcrCopy.Status.NotAfter = &na
-		pcrCopy.Status.BeginRefreshAt = &br
+		updated := latest.DeepCopy()
+		updated.Status.CertificateChain = certChain
+
+		block, _ := pem.Decode([]byte(certChain))
+		issuedCert, err := x509.ParseCertificate(block.Bytes)
+		if err == nil {
+			nb := metav1.NewTime(issuedCert.NotBefore)
+			na := metav1.NewTime(issuedCert.NotAfter)
+			br := metav1.NewTime(issuedCert.NotBefore.Add(issuedCert.NotAfter.Sub(issuedCert.NotBefore) / 2))
+			updated.Status.NotBefore = &nb
+			updated.Status.NotAfter = &na
+			updated.Status.BeginRefreshAt = &br
+		}
+
+		updated.Status.Conditions = append(updated.Status.Conditions, metav1.Condition{
+			Type:               "Issued",
+			Status:             metav1.ConditionTrue,
+			Reason:             "Signed",
+			Message:            "Certificate issued",
+			LastTransitionTime: metav1.Now(),
+		})
+
+		return c.clientset.CertificatesV1beta1().PodCertificateRequests(updated.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{})
 	}
 
-	pcrCopy.Status.Conditions = append(pcrCopy.Status.Conditions, metav1.Condition{
-		Type:               "Issued",
-		Status:             metav1.ConditionTrue,
-		Reason:             "Signed",
-		Message:            "Certificate issued",
-		LastTransitionTime: metav1.Now(),
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest, getErr := c.clientset.CertificatesV1beta1().PodCertificateRequests(pcr.Namespace).Get(ctx, pcr.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return getErr
+		}
+		if latest.Status.CertificateChain != "" {
+			return nil
+		}
+		_, updateErr := statusUpdate(latest)
+		return updateErr
 	})
-
-	_, err = c.clientset.CertificatesV1beta1().PodCertificateRequests(pcr.Namespace).UpdateStatus(ctx, pcrCopy, metav1.UpdateOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to update PCR status: %v", err)
+		return fmt.Errorf("failed to update PCR status: %w", err)
 	}
 
 	slog.Info("Successfully issued certificate", "name", pcr.Name, "namespace", pcr.Namespace)
@@ -303,6 +328,13 @@ func main() {
 	var kmsKeyID string
 	var rootCAFile string
 
+	var leaderElect bool
+	var leaderLeaseName string
+	var leaderLeaseNamespace string
+	var leaderLeaseDuration time.Duration
+	var leaderRenewDeadline time.Duration
+	var leaderRetryPeriod time.Duration
+
 	flag.StringVar(&mode, "mode", "static", "Issuer mode: static, step or gcpkms")
 	flag.StringVar(&caCertFile, "ca-cert", "k8s/ca.crt", "Path to CA certificate (static or gcpkms mode)")
 	flag.StringVar(&caKeyFile, "ca-key", "k8s/ca.key", "Path to CA key (static mode)")
@@ -315,6 +347,13 @@ func main() {
 	flag.StringVar(&stepKeysetFile, "step-keyset", "", "Path to Tink Keyset for Step-CA")
 	flag.StringVar(&stepRootFile, "step-root", "", "Path to Step-CA Root certificate")
 	flag.StringVar(&kmsKeyID, "kms-key-id", "", "GCP KMS key version resource ID for gcpkms mode")
+
+	flag.BoolVar(&leaderElect, "leader-elect", false, "Enable leader election for HA deployments")
+	flag.StringVar(&leaderLeaseName, "leader-elect-lease-name", "pod-cert-controller", "Name of the leader election lease")
+	flag.StringVar(&leaderLeaseNamespace, "leader-elect-lease-namespace", "", "Namespace for the leader election lease (defaults to pod namespace or default)")
+	flag.DurationVar(&leaderLeaseDuration, "leader-elect-lease-duration", 15*time.Second, "Leader election lease duration")
+	flag.DurationVar(&leaderRenewDeadline, "leader-elect-renew-deadline", 10*time.Second, "Leader election renew deadline")
+	flag.DurationVar(&leaderRetryPeriod, "leader-elect-retry-period", 2*time.Second, "Leader election retry period")
 
 	flag.Parse()
 
@@ -437,9 +476,15 @@ func main() {
 
 	controller := NewController(clientset, issuer, pcrInformer)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	go syncCTB(ctx, clientset, issuer)
-	controller.Run(ctx)
+	runWithOptionalLeaderElection(ctx, clientset, issuer, controller, leaderElectionConfig{
+		enabled:       leaderElect,
+		leaseName:     leaderLeaseName,
+		leaseNS:       leaderElectionNamespace(leaderLeaseNamespace),
+		leaseDuration: leaderLeaseDuration,
+		renewDeadline: leaderRenewDeadline,
+		retryPeriod:   leaderRetryPeriod,
+	})
 }

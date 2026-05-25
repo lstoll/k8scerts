@@ -25,6 +25,9 @@ rules:
   resources: ["signers"]
   resourceNames: ["example.com/pod-signer"]
   verbs: ["sign", "attest"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "create", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -45,7 +48,7 @@ metadata:
   name: pod-cert-controller
   namespace: default
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: pod-cert-controller
@@ -58,6 +61,11 @@ spec:
       containers:
       - name: controller
         image: pod-cert-controller
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         # Example for GCP KMS mode on GKE with Workload Identity:
         #
         # Prerequisites:
@@ -86,6 +94,7 @@ spec:
         #
         # Example for Step mode:
         args:
+        - "--leader-elect=true"
         - "--mode=step"
         - "--step-url=https://step-ca:9000"
         - "--step-provisioner=pod-cert-issuer"
