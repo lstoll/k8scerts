@@ -9,6 +9,6 @@ runtimeConfig:
   certificates.k8s.io/v1beta1/clustertrustbundles: true
 nodes:
 - role: control-plane
-  image: kindest/node:latest
+  image: kindest/node:v1.36.0
 - role: worker
-  image: kindest/node:latest
+  image: kindest/node:v1.36.0

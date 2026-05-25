@@ -1,0 +1,10 @@
+.git
+.github
+.jj
+*.md
+AGENTS.md
+k8s/*.pem
+k8s/*.key
+k8s/*.json
+hack/kind-kubeconfig
+.envrc

@@ -32,7 +32,7 @@ This project implements a Kubernetes controller for the Pod Certificates API (KE
 - **Level:** Support a `--debug` flag to toggle `slog.LevelDebug`.
 
 ### Development Workflow
-- **Local Cluster:** Use `kind` with specific feature gates (`PodCertificateRequest`, `ClusterTrustBundle`, etc.) and the `kindest/node:latest` (1.36 alpha) image.
+- **Local Cluster:** Use `kind` with specific feature gates (`PodCertificateRequest`, `ClusterTrustBundle`, etc.) and a locally built `kindest/node:v1.36.0` image (`hack/kind-node-image.sh`; not published on Docker Hub yet).
 - **CA Setup:** Use `hack/step-ca-setup.sh` to generate Root/Intermediate CAs and provisioner keys for development.
 - **Kubeconfig:** Managed via `hack/kind-start.sh` and automatically exported via `.envrc` for `direnv` users.
 - **Deployment:** Prefer `skaffold` for building and deploying. Base images must be `debian:trixie-slim`.
