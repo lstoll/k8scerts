@@ -36,7 +36,7 @@ type controllerRuntime struct {
 }
 
 type Issuer interface {
-	Issue(ctx context.Context, csr *x509.CertificateRequest, expiration time.Duration, podName, namespace string) (string, error)
+	Issue(ctx context.Context, req IssueRequest) (string, error)
 	TrustBundle() string
 }
 
@@ -50,7 +50,7 @@ type StaticIssuer struct {
 	trustBundle []byte
 }
 
-func (i *StaticIssuer) Issue(ctx context.Context, csr *x509.CertificateRequest, expiration time.Duration, podName, namespace string) (string, error) {
+func (i *StaticIssuer) Issue(ctx context.Context, req IssueRequest) (string, error) {
 	if setter, ok := i.caKey.(signContextSetter); ok {
 		setter.SetSignContext(ctx)
 	}
@@ -61,17 +61,29 @@ func (i *StaticIssuer) Issue(ctx context.Context, csr *x509.CertificateRequest, 
 		return "", err
 	}
 
+	uriSANs, err := parseURISANs(req.Identity.URISANs)
+	if err != nil {
+		return "", err
+	}
+
+	subject := req.CSR.Subject
+	if req.Identity.CommonName != "" {
+		subject.CommonName = req.Identity.CommonName
+	}
+
 	now := time.Now()
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
-		Subject:      csr.Subject,
+		Subject:      subject,
 		NotBefore:    now,
-		NotAfter:     now.Add(expiration),
+		NotAfter:     now.Add(req.Expiration),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		DNSNames:     append([]string(nil), req.Identity.DNSSANs...),
+		URIs:         uriSANs,
 	}
 
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, i.caCert, csr.PublicKey, i.caKey)
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, i.caCert, req.CSR.PublicKey, i.caKey)
 	if err != nil {
 		return "", err
 	}
@@ -112,15 +124,17 @@ type Controller struct {
 	clientset  kubernetes.Interface
 	issuer     Issuer
 	signerName string
+	identity   identityConfig
 	queue      workqueue.TypedRateLimitingInterface[string]
 	informer   cache.SharedIndexInformer
 }
 
-func NewController(clientset kubernetes.Interface, issuer Issuer, informer cache.SharedIndexInformer, signerName string) *Controller {
+func NewController(clientset kubernetes.Interface, issuer Issuer, informer cache.SharedIndexInformer, signerName string, identity identityConfig) *Controller {
 	c := &Controller{
 		clientset:  clientset,
 		issuer:     issuer,
 		signerName: signerName,
+		identity:   identity,
 		informer:   informer,
 		queue:      workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 	}
@@ -201,7 +215,12 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		}
 	}
 
-	slog.Info("Signing PodCertificateRequest", "name", pcr.Name, "namespace", pcr.Namespace)
+	slog.Info("Signing PodCertificateRequest",
+		"name", pcr.Name,
+		"namespace", pcr.Namespace,
+		"pod", pcr.Spec.PodName,
+		"serviceAccount", pcr.Spec.ServiceAccountName,
+	)
 
 	if len(pcr.Spec.StubPKCS10Request) == 0 {
 		return fmt.Errorf("stubPKCS10Request is empty")
@@ -217,7 +236,16 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 		expiration = time.Duration(*pcr.Spec.MaxExpirationSeconds) * time.Second
 	}
 
-	certChain, err := c.issuer.Issue(ctx, csr, expiration, pcr.Spec.PodName, pcr.Namespace)
+	workloadIdentity, err := buildWorkloadIdentity(pcr, c.identity)
+	if err != nil {
+		return fmt.Errorf("invalid pod certificate identity: %w", err)
+	}
+
+	certChain, err := c.issuer.Issue(ctx, IssueRequest{
+		CSR:        csr,
+		Expiration: expiration,
+		Identity:   workloadIdentity,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to issue certificate: %w", err)
 	}
@@ -331,6 +359,7 @@ func main() {
 	var rootCAFile string
 	var signerName string
 	var trustBundleName string
+	var spiffeTrustDomain string
 
 	var leaderElect bool
 	var leaderLeaseName string
@@ -345,6 +374,7 @@ func main() {
 	flag.StringVar(&rootCAFile, "root-ca-cert", "", "Optional offline root CA certificate to append to the ClusterTrustBundle (gcpkms mode)")
 	flag.StringVar(&signerName, "signer-name", defaultSignerName, "Signer name managed by this controller")
 	flag.StringVar(&trustBundleName, "trust-bundle-name", "", "ClusterTrustBundle name (defaults to <signer-name-with-colons>:ca)")
+	flag.StringVar(&spiffeTrustDomain, "spiffe-trust-domain", "", "Trust domain for SPIFFE URI SANs (spiffe://<domain>/ns/<namespace>/sa/<serviceaccount>); disabled when empty")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig")
 	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
 
@@ -371,6 +401,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	normalizedTrustDomain, err := normalizeTrustDomain(spiffeTrustDomain)
+	if err != nil {
+		slog.Error("invalid spiffe trust domain", "error", err)
+		os.Exit(1)
+	}
+
+	identity := identityConfig{
+		spiffeTrustDomain: normalizedTrustDomain,
+		signerName:        signerName,
+	}
+
 	runtime := controllerRuntime{
 		signerName:      signerName,
 		trustBundleName: trustBundleName,
@@ -378,6 +419,9 @@ func main() {
 	slog.Info("controller configuration",
 		"signer-name", runtime.signerName,
 		"trust-bundle-name", runtime.trustBundleName,
+		"spiffe-trust-domain", identity.spiffeTrustDomain,
+		"user-annotation-cn", annotationKey(signerName, annotationCertificateCN),
+		"user-annotation-dns-names", annotationKey(signerName, annotationDNSNames),
 	)
 
 	level := slog.LevelInfo
@@ -497,7 +541,7 @@ func main() {
 	factory := informers.NewSharedInformerFactory(clientset, 10*time.Minute)
 	pcrInformer := factory.Certificates().V1beta1().PodCertificateRequests().Informer()
 
-	controller := NewController(clientset, issuer, pcrInformer, runtime.signerName)
+	controller := NewController(clientset, issuer, pcrInformer, runtime.signerName, identity)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

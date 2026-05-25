@@ -15,6 +15,9 @@ echo "--- 2. Getting Kubeconfig ---"
 kind get kubeconfig --name "$KIND_CLUSTER_NAME" > kind.kubeconfig
 export KUBECONFIG=$(pwd)/kind.kubeconfig
 export SIGNER_NAME=${SIGNER_NAME:-example.com/pod-signer}
+export SPIFFE_TRUST_DOMAIN=${SPIFFE_TRUST_DOMAIN:-example.com}
+export EXPECT_SPIFFE_ID=${EXPECT_SPIFFE_ID:-spiffe://${SPIFFE_TRUST_DOMAIN}/ns/default/sa/default}
+export EXPECT_DNS_NAMES=${EXPECT_DNS_NAMES:-cert-test.default.svc.cluster.local}
 
 echo "--- 5. Deploying Test Pods ---"
 kubectl delete pod cert-test trust-bundle-test --ignore-not-found --grace-period=0 --force

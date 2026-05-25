@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -85,6 +86,43 @@ func main() {
 	if _, err := leaf.Verify(opts); err != nil {
 		fmt.Printf("Verification FAILED: %v\n", err)
 		os.Exit(1)
+	}
+
+	if expectedSPIFFE := os.Getenv("EXPECT_SPIFFE_ID"); expectedSPIFFE != "" {
+		found := false
+		for _, uri := range leaf.URIs {
+			if uri.String() == expectedSPIFFE {
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Printf("Verification FAILED: expected SPIFFE ID %q not found in leaf URIs\n", expectedSPIFFE)
+			os.Exit(1)
+		}
+		fmt.Printf("SPIFFE ID verified: %s\n", expectedSPIFFE)
+	}
+
+	if expectedDNS := os.Getenv("EXPECT_DNS_NAMES"); expectedDNS != "" {
+		want := make(map[string]struct{})
+		for _, name := range strings.Split(expectedDNS, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			want[name] = struct{}{}
+		}
+		got := make(map[string]struct{}, len(leaf.DNSNames))
+		for _, name := range leaf.DNSNames {
+			got[name] = struct{}{}
+		}
+		for name := range want {
+			if _, ok := got[name]; !ok {
+				fmt.Printf("Verification FAILED: expected DNS name %q not found in leaf DNSNames %#v\n", name, leaf.DNSNames)
+				os.Exit(1)
+			}
+		}
+		fmt.Printf("DNS names verified: %s\n", expectedDNS)
 	}
 
 	fmt.Println("Verification SUCCESSFUL")

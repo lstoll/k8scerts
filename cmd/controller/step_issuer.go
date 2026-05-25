@@ -5,7 +5,6 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
@@ -41,30 +40,32 @@ func NewStepIssuer(caURL, provisionerName string, keysetHandle *keyset.Handle, r
 	}, nil
 }
 
-func (i *StepIssuer) Issue(ctx context.Context, csr *x509.CertificateRequest, expiration time.Duration, podName, namespace string) (string, error) {
+func (i *StepIssuer) Issue(ctx context.Context, req IssueRequest) (string, error) {
 	signer, err := jwt.NewSigner(i.keysetHandle)
 	if err != nil {
 		return "", fmt.Errorf("failed to create JWT signer: %w", err)
 	}
 
-	cnf, err := generateCnfClaim(csr.PublicKey)
+	cnf, err := generateCnfClaim(req.CSR.PublicKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate cnf claim: %w", err)
 	}
 
 	// Step-CA often backdates the NotBefore by 1 minute, which increases the total lifetime.
 	// We subtract 5 minutes from the requested expiration to ensure we stay within maxExpirationSeconds.
-	requestedExpiration := time.Now().Add(expiration - 5*time.Minute)
+	requestedExpiration := time.Now().Add(req.Expiration - 5*time.Minute)
+
+	sans := jwtSANs(req.Identity)
 
 	rawClaims := map[string]any{
-		"sans": []any{},
+		"sans": sans,
 		"cnf":  cnf,
 	}
 
 	tokenOpts := &jwt.RawJWTOptions{
 		Audiences:    []string{i.caURL + "/sign", i.caURL + "/1.0/sign"},
 		Issuer:       ptr(i.provisionerName),
-		Subject:      ptr(podName),
+		Subject:      ptr(jwtSubject(req.Identity)),
 		ExpiresAt:    new(time.Now().Add(1 * time.Minute)),
 		CustomClaims: rawClaims,
 	}
@@ -80,7 +81,7 @@ func (i *StepIssuer) Issue(ctx context.Context, csr *x509.CertificateRequest, ex
 	}
 
 	resp, err := i.client.Sign(&api.SignRequest{
-		CsrPEM:   api.CertificateRequest{CertificateRequest: csr},
+		CsrPEM:   api.CertificateRequest{CertificateRequest: req.CSR},
 		OTT:      signedToken,
 		NotAfter: api.NewTimeDuration(requestedExpiration),
 	})

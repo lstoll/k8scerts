@@ -96,6 +96,7 @@ spec:
         args:
         - "--leader-elect=true"
         - "--signer-name=example.com/pod-signer"
+        - "--spiffe-trust-domain=example.com"
         - "--mode=step"
         - "--step-url=https://step-ca:9000"
         - "--step-provisioner=pod-cert-issuer"

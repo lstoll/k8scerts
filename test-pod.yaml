@@ -3,10 +3,16 @@ kind: Pod
 metadata:
   name: cert-test
 spec:
+  serviceAccountName: default
   containers:
   - name: test
     image: ${VERIFY_IMG}
     imagePullPolicy: IfNotPresent
+    env:
+    - name: EXPECT_SPIFFE_ID
+      value: "${EXPECT_SPIFFE_ID}"
+    - name: EXPECT_DNS_NAMES
+      value: "${EXPECT_DNS_NAMES}"
     volumeMounts:
     - name: certs
       mountPath: /var/run/certs
@@ -18,6 +24,9 @@ spec:
           signerName: "${SIGNER_NAME}"
           keyType: ECDSAP384
           credentialBundlePath: pod.pem
+          userAnnotations:
+            example.com/certificate-cn: cert-test
+            example.com/dns-names: cert-test.default.svc.cluster.local
       - clusterTrustBundle:
           signerName: "${SIGNER_NAME}"
           path: ca.crt
