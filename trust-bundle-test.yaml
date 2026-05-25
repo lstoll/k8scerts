@@ -23,4 +23,5 @@ spec:
       sources:
       - clusterTrustBundle:
           signerName: "${SIGNER_NAME}"
+          labelSelector: {}
           path: ca.crt

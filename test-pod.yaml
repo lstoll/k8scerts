@@ -29,4 +29,5 @@ spec:
             example.com/dns-names: cert-test.default.svc.cluster.local
       - clusterTrustBundle:
           signerName: "${SIGNER_NAME}"
+          labelSelector: {}
           path: ca.crt
